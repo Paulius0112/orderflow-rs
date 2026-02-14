@@ -1,0 +1,39 @@
+# Trading Engine Orders — Configuration
+#
+# All values shown below are the defaults. Uncomment and modify as needed.
+# CLI flags (e.g. --scenario, --initial-price) override values from this file.
+
+[simulation]
+# Market scenario: normal | crash | volatile | flash-crash | rally
+scenario = "normal"
+
+# Starting mid-price
+initial_price = 100.0
+
+# Tick interval in seconds (100ms)
+tick_interval = 0.1
+
+# Minimum price increment
+tick_size = 0.01
+
+[network]
+# UDP multicast group and port
+multicast_group = "239.255.0.1"
+multicast_port = 5555
+
+[orders]
+# Log-normal order size distribution parameters
+size_mean_log = 3.0
+size_std_log = 1.0
+
+# Time-to-live range for limit orders (seconds)
+ttl_min = 1.0
+ttl_max = 30.0
+
+[shocks]
+# Probability of a shock event per tick (~once per 333s at 100ms ticks)
+probability = 0.0003
+
+# Shock magnitude range (as fraction of price)
+min_pct = 0.02
+max_pct = 0.06
