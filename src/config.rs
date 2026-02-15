@@ -41,6 +41,10 @@ pub struct Cli {
     /// Shock probability per tick
     #[arg(long, value_name = "PROB")]
     pub shock_prob: Option<f64>,
+
+    /// RNG seed for reproducible runs (random if omitted)
+    #[arg(long, value_name = "SEED")]
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +69,7 @@ pub struct SimulationConfig {
     pub initial_price: f64,
     pub tick_interval: f64,
     pub tick_size: f64,
+    pub seed: Option<u64>,
 }
 
 impl Default for SimulationConfig {
@@ -74,6 +79,7 @@ impl Default for SimulationConfig {
             initial_price: 100.0,
             tick_interval: 0.1,
             tick_size: 0.01,
+            seed: None,
         }
     }
 }
@@ -158,6 +164,7 @@ pub struct AppConfig {
     pub shock_prob: f64,
     pub shock_min_pct: f64,
     pub shock_max_pct: f64,
+    pub seed: u64,
 }
 
 impl AppConfig {
@@ -194,6 +201,14 @@ impl AppConfig {
         if let Some(v) = cli.shock_prob {
             file_cfg.shocks.probability = v;
         }
+        if let Some(v) = cli.seed {
+            file_cfg.simulation.seed = Some(v);
+        }
+
+        let seed = file_cfg
+            .simulation
+            .seed
+            .unwrap_or_else(|| rand::random());
 
         let multicast_group: Ipv4Addr = file_cfg
             .network
@@ -215,6 +230,7 @@ impl AppConfig {
             shock_prob: file_cfg.shocks.probability,
             shock_min_pct: file_cfg.shocks.min_pct,
             shock_max_pct: file_cfg.shocks.max_pct,
+            seed,
         })
     }
 }

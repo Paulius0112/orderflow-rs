@@ -1,5 +1,6 @@
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use rand_distr::{Exp, LogNormal, Poisson, Uniform};
 use std::collections::HashMap;
 
@@ -15,7 +16,7 @@ fn dt_years(tick_interval: f64) -> f64 {
 }
 
 pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
 
     let scenario_cfg = ScenarioConfig::from_scenario(cfg.scenario);
     let mut state = RegimeState::new(scenario_cfg.starting_regime, &mut rng);
@@ -25,6 +26,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Starting Order Generation Engine");
     println!("Scenario: {}", cfg.scenario);
+    println!("Seed: {}", cfg.seed);
     println!("Initial regime: {}", state.current);
 
     let dt = dt_years(cfg.tick_interval);
@@ -62,6 +64,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
                 cfg.shock_min_pct + rng.gen::<f64>() * (cfg.shock_max_pct - cfg.shock_min_pct);
             let direction: f64 = if rng.gen::<f64>() < 0.5 { 1.0 } else { -1.0 };
             mid *= 1.0 + direction * shock_pct;
+            mid = mid.max(cfg.tick_size);
 
             let sign = if direction > 0.0 { "+" } else { "" };
             println!(
@@ -93,6 +96,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         };
         let diffusion_term = params.sigma * dt.sqrt() * z;
         mid *= (drift_term + diffusion_term).exp();
+        mid = mid.max(cfg.tick_size);
 
         // --- Print regime changes ---
         if state.current != last_printed_regime {

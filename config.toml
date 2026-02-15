@@ -16,6 +16,9 @@ tick_interval = 0.1
 # Minimum price increment
 tick_size = 0.01
 
+# RNG seed for reproducible runs (random if omitted)
+# seed = 42
+
 [network]
 # UDP multicast group and port
 multicast_group = "239.255.0.1"
