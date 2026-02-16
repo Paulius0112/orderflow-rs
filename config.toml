@@ -16,6 +16,10 @@ tick_interval = 0.1
 # Minimum price increment
 tick_size = 0.01
 
+# Throughput multiplier applied to order generation rates.
+# 1.0 = use regime defaults, 2.0 = double throughput, 0.5 = half throughput
+throughput_scale = 1.0
+
 [network]
 # UDP multicast group and port
 multicast_group = "239.255.0.1"
@@ -37,3 +41,13 @@ probability = 0.0003
 # Shock magnitude range (as fraction of price)
 min_pct = 0.02
 max_pct = 0.06
+
+[output]
+# Output mode: console | file | both | quiet
+mode = "console"
+
+# Log file path (used when mode is "file" or "both")
+log_file = "orderflow.log"
+
+# How often to print summary stats to console (seconds)
+display_interval = 1.0

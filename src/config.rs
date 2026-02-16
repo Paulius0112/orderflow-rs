@@ -1,9 +1,50 @@
 use clap::Parser;
 use serde::Deserialize;
+use std::fmt;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use crate::scenario::Scenario;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputMode {
+    Console,
+    File,
+    Both,
+    Quiet,
+}
+
+impl Default for OutputMode {
+    fn default() -> Self {
+        Self::Console
+    }
+}
+
+impl fmt::Display for OutputMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutputMode::Console => write!(f, "console"),
+            OutputMode::File => write!(f, "file"),
+            OutputMode::Both => write!(f, "both"),
+            OutputMode::Quiet => write!(f, "quiet"),
+        }
+    }
+}
+
+fn parse_output_mode(s: &str) -> Result<OutputMode, Box<dyn std::error::Error>> {
+    match s {
+        "console" => Ok(OutputMode::Console),
+        "file" => Ok(OutputMode::File),
+        "both" => Ok(OutputMode::Both),
+        "quiet" => Ok(OutputMode::Quiet),
+        _ => Err(format!(
+            "unknown output mode '{}'. available: console, file, both, quiet",
+            s
+        )
+        .into()),
+    }
+}
 
 /// Market microstructure simulator for stress-testing order books.
 #[derive(Debug, Parser)]
@@ -41,6 +82,22 @@ pub struct Cli {
     /// Shock probability per tick
     #[arg(long, value_name = "PROB")]
     pub shock_prob: Option<f64>,
+
+    /// Output mode: console, file, both, quiet
+    #[arg(long, value_name = "MODE")]
+    pub output: Option<String>,
+
+    /// Log file path (used when output mode is file or both)
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<String>,
+
+    /// Throughput multiplier applied to order generation rates (default: 1.0)
+    #[arg(long, value_name = "SCALE")]
+    pub throughput_scale: Option<f64>,
+
+    /// Console display interval in seconds (how often stats are printed)
+    #[arg(long, value_name = "SECONDS")]
+    pub display_interval: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +113,9 @@ pub struct FileConfig {
 
     #[serde(default)]
     pub shocks: ShockConfig,
+
+    #[serde(default)]
+    pub output: OutputConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +125,7 @@ pub struct SimulationConfig {
     pub initial_price: f64,
     pub tick_interval: f64,
     pub tick_size: f64,
+    pub throughput_scale: f64,
 }
 
 impl Default for SimulationConfig {
@@ -74,6 +135,25 @@ impl Default for SimulationConfig {
             initial_price: 100.0,
             tick_interval: 0.1,
             tick_size: 0.01,
+            throughput_scale: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    pub mode: OutputMode,
+    pub log_file: String,
+    pub display_interval: f64,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            mode: OutputMode::Console,
+            log_file: "orderflow.log".to_string(),
+            display_interval: 1.0,
         }
     }
 }
@@ -139,6 +219,7 @@ impl Default for FileConfig {
             network: NetworkConfig::default(),
             orders: OrderConfig::default(),
             shocks: ShockConfig::default(),
+            output: OutputConfig::default(),
         }
     }
 }
@@ -158,6 +239,10 @@ pub struct AppConfig {
     pub shock_prob: f64,
     pub shock_min_pct: f64,
     pub shock_max_pct: f64,
+    pub output_mode: OutputMode,
+    pub log_file: String,
+    pub display_interval: f64,
+    pub throughput_scale: f64,
 }
 
 impl AppConfig {
@@ -194,6 +279,18 @@ impl AppConfig {
         if let Some(v) = cli.shock_prob {
             file_cfg.shocks.probability = v;
         }
+        if let Some(ref m) = cli.output {
+            file_cfg.output.mode = parse_output_mode(m)?;
+        }
+        if let Some(ref p) = cli.log_file {
+            file_cfg.output.log_file = p.clone();
+        }
+        if let Some(v) = cli.throughput_scale {
+            file_cfg.simulation.throughput_scale = v;
+        }
+        if let Some(v) = cli.display_interval {
+            file_cfg.output.display_interval = v;
+        }
 
         let multicast_group: Ipv4Addr = file_cfg
             .network
@@ -215,6 +312,10 @@ impl AppConfig {
             shock_prob: file_cfg.shocks.probability,
             shock_min_pct: file_cfg.shocks.min_pct,
             shock_max_pct: file_cfg.shocks.max_pct,
+            output_mode: file_cfg.output.mode,
+            log_file: file_cfg.output.log_file,
+            display_interval: file_cfg.output.display_interval,
+            throughput_scale: file_cfg.simulation.throughput_scale,
         })
     }
 }
