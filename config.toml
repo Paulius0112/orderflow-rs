@@ -20,6 +20,9 @@ tick_size = 0.01
 # 1.0 = use regime defaults, 2.0 = double throughput, 0.5 = half throughput
 throughput_scale = 1.0
 
+# RNG seed for reproducible runs (random if omitted)
+# seed = 42
+
 [network]
 # UDP multicast group and port
 multicast_group = "239.255.0.1"

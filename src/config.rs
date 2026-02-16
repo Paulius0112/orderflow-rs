@@ -98,6 +98,10 @@ pub struct Cli {
     /// Console display interval in seconds (how often stats are printed)
     #[arg(long, value_name = "SECONDS")]
     pub display_interval: Option<f64>,
+
+    /// RNG seed for reproducible runs (random if omitted)
+    #[arg(long, value_name = "SEED")]
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +130,7 @@ pub struct SimulationConfig {
     pub tick_interval: f64,
     pub tick_size: f64,
     pub throughput_scale: f64,
+    pub seed: Option<u64>,
 }
 
 impl Default for SimulationConfig {
@@ -136,6 +141,7 @@ impl Default for SimulationConfig {
             tick_interval: 0.1,
             tick_size: 0.01,
             throughput_scale: 1.0,
+            seed: None,
         }
     }
 }
@@ -243,6 +249,7 @@ pub struct AppConfig {
     pub log_file: String,
     pub display_interval: f64,
     pub throughput_scale: f64,
+    pub seed: u64,
 }
 
 impl AppConfig {
@@ -291,6 +298,14 @@ impl AppConfig {
         if let Some(v) = cli.display_interval {
             file_cfg.output.display_interval = v;
         }
+        if let Some(v) = cli.seed {
+            file_cfg.simulation.seed = Some(v);
+        }
+
+        let seed = file_cfg
+            .simulation
+            .seed
+            .unwrap_or_else(|| rand::random());
 
         let multicast_group: Ipv4Addr = file_cfg
             .network
@@ -316,6 +331,7 @@ impl AppConfig {
             log_file: file_cfg.output.log_file,
             display_interval: file_cfg.output.display_interval,
             throughput_scale: file_cfg.simulation.throughput_scale,
+            seed,
         })
     }
 }

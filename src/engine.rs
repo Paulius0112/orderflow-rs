@@ -1,5 +1,6 @@
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use rand_distr::{Exp, LogNormal, Poisson, Uniform};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -175,7 +176,7 @@ impl Output {
 }
 
 pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
 
     let scenario_cfg = ScenarioConfig::from_scenario(cfg.scenario);
     let mut state = RegimeState::new(scenario_cfg.starting_regime, &mut rng);
@@ -194,6 +195,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     out.print(&box_line(&format!("regime:      {}", state.current)));
     out.print(&box_line(&format!("mid price:   {}", cfg.initial_price)));
     out.print(&box_line(&format!("tick:        {}s", cfg.tick_interval)));
+    out.print(&box_line(&format!("seed:        {}", cfg.seed)));
     out.print(&box_line(&format!("throughput:  {}x", scale)));
     out.print(&box_line(&format!("output:      {}", cfg.output_mode)));
     if out.to_file() {
@@ -247,6 +249,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
                 cfg.shock_min_pct + rng.gen::<f64>() * (cfg.shock_max_pct - cfg.shock_min_pct);
             let direction: f64 = if rng.gen::<f64>() < 0.5 { 1.0 } else { -1.0 };
             mid *= 1.0 + direction * shock_pct;
+            mid = mid.max(cfg.tick_size);
 
             let sign = if direction > 0.0 { "+" } else { "" };
             out.event(&format!(
@@ -282,6 +285,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         };
         let diffusion_term = params.sigma * dt.sqrt() * z;
         mid *= (drift_term + diffusion_term).exp();
+        mid = mid.max(cfg.tick_size);
 
         // --- Print regime changes ---
         if state.current != last_printed_regime {
