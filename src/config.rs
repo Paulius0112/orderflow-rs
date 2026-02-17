@@ -15,6 +15,28 @@ pub enum OutputMode {
     Quiet,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WireFormat {
+    Text,
+    Binary,
+}
+
+impl Default for WireFormat {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
+impl fmt::Display for WireFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WireFormat::Text => write!(f, "text"),
+            WireFormat::Binary => write!(f, "binary"),
+        }
+    }
+}
+
 impl Default for OutputMode {
     fn default() -> Self {
         Self::Console
@@ -43,6 +65,14 @@ fn parse_output_mode(s: &str) -> Result<OutputMode, Box<dyn std::error::Error>> 
             s
         )
         .into()),
+    }
+}
+
+fn parse_wire_format(s: &str) -> Result<WireFormat, Box<dyn std::error::Error>> {
+    match s {
+        "text" => Ok(WireFormat::Text),
+        "binary" => Ok(WireFormat::Binary),
+        _ => Err(format!("unknown wire format '{}'. available: text, binary", s).into()),
     }
 }
 
@@ -102,6 +132,18 @@ pub struct Cli {
     /// RNG seed for reproducible runs (random if omitted)
     #[arg(long, value_name = "SEED")]
     pub seed: Option<u64>,
+
+    /// Wire format used on multicast: text, binary
+    #[arg(long, value_name = "FORMAT")]
+    pub wire_format: Option<String>,
+
+    /// Enable UDP control API on localhost (pause/resume/rate/regime/reload)
+    #[arg(long, value_name = "BOOL")]
+    pub control_enabled: Option<bool>,
+
+    /// UDP control API bind address (example: 127.0.0.1:6001)
+    #[arg(long, value_name = "ADDR:PORT")]
+    pub control_bind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +162,9 @@ pub struct FileConfig {
 
     #[serde(default)]
     pub output: OutputConfig,
+
+    #[serde(default)]
+    pub control: ControlConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +214,7 @@ impl Default for OutputConfig {
 pub struct NetworkConfig {
     pub multicast_group: String,
     pub multicast_port: u16,
+    pub wire_format: WireFormat,
 }
 
 impl Default for NetworkConfig {
@@ -176,6 +222,7 @@ impl Default for NetworkConfig {
         Self {
             multicast_group: "239.255.0.1".to_string(),
             multicast_port: 5555,
+            wire_format: WireFormat::Text,
         }
     }
 }
@@ -218,6 +265,22 @@ impl Default for ShockConfig {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct ControlConfig {
+    pub enabled: bool,
+    pub bind: String,
+}
+
+impl Default for ControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind: "127.0.0.1:6001".to_string(),
+        }
+    }
+}
+
 impl Default for FileConfig {
     fn default() -> Self {
         Self {
@@ -226,18 +289,21 @@ impl Default for FileConfig {
             orders: OrderConfig::default(),
             shocks: ShockConfig::default(),
             output: OutputConfig::default(),
+            control: ControlConfig::default(),
         }
     }
 }
 
 /// Resolved configuration after merging TOML file + CLI overrides.
 pub struct AppConfig {
+    pub config_path: Option<PathBuf>,
     pub scenario: Scenario,
     pub initial_price: f64,
     pub tick_interval: f64,
     pub tick_size: f64,
     pub multicast_group: Ipv4Addr,
     pub multicast_port: u16,
+    pub wire_format: WireFormat,
     pub size_mean_log: f64,
     pub size_std_log: f64,
     pub ttl_min: f64,
@@ -250,6 +316,8 @@ pub struct AppConfig {
     pub display_interval: f64,
     pub throughput_scale: f64,
     pub seed: u64,
+    pub control_enabled: bool,
+    pub control_bind: String,
 }
 
 impl AppConfig {
@@ -283,6 +351,9 @@ impl AppConfig {
         if let Some(p) = cli.multicast_port {
             file_cfg.network.multicast_port = p;
         }
+        if let Some(ref f) = cli.wire_format {
+            file_cfg.network.wire_format = parse_wire_format(f)?;
+        }
         if let Some(v) = cli.shock_prob {
             file_cfg.shocks.probability = v;
         }
@@ -301,6 +372,12 @@ impl AppConfig {
         if let Some(v) = cli.seed {
             file_cfg.simulation.seed = Some(v);
         }
+        if let Some(v) = cli.control_enabled {
+            file_cfg.control.enabled = v;
+        }
+        if let Some(ref v) = cli.control_bind {
+            file_cfg.control.bind = v.clone();
+        }
 
         let seed = file_cfg
             .simulation
@@ -314,12 +391,14 @@ impl AppConfig {
             .map_err(|e| format!("invalid multicast group '{}': {}", file_cfg.network.multicast_group, e))?;
 
         Ok(Self {
+            config_path: cli.config.clone(),
             scenario: file_cfg.simulation.scenario,
             initial_price: file_cfg.simulation.initial_price,
             tick_interval: file_cfg.simulation.tick_interval,
             tick_size: file_cfg.simulation.tick_size,
             multicast_group,
             multicast_port: file_cfg.network.multicast_port,
+            wire_format: file_cfg.network.wire_format,
             size_mean_log: file_cfg.orders.size_mean_log,
             size_std_log: file_cfg.orders.size_std_log,
             ttl_min: file_cfg.orders.ttl_min,
@@ -332,6 +411,8 @@ impl AppConfig {
             display_interval: file_cfg.output.display_interval,
             throughput_scale: file_cfg.simulation.throughput_scale,
             seed,
+            control_enabled: file_cfg.control.enabled,
+            control_bind: file_cfg.control.bind,
         })
     }
 }
