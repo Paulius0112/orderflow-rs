@@ -36,6 +36,9 @@ cargo build --release
 | `--tick-interval <SECS>` | Tick interval in seconds (default: `0.1`) |
 | `--tick-size <SIZE>` | Minimum price increment (default: `0.01`) |
 | `--shock-prob <PROB>` | Shock probability per tick (default: `0.0003`) |
+| `--wire-format <FORMAT>` | Network wire format: `text`, `binary` |
+| `--control-enabled <BOOL>` | Enable runtime UDP control API |
+| `--control-bind <ADDR:PORT>` | Control API bind address (default: `127.0.0.1:6001`) |
 
 ### Configuration File
 
@@ -75,10 +78,53 @@ The simulator uses a state machine with 5 regimes. Each regime controls volatili
 
 ## Wire Protocol
 
-Orders are sent via UDP multicast as text:
+Orders are sent via UDP multicast with selectable format.
+
+### Text format (`wire_format = "text"`)
 
 ```
 ORDER|id=42|side=BUY|type=LIMIT|price=99.85|size=23|time=1.300
 CANCEL|id=42|time=5.700
+```
+
+### Binary format (`wire_format = "binary"`)
+
+Little-endian frames with header:
+
+- `magic[2] = "OF"`
+- `version = 1`
+- `msg_type = 1` for ORDER, `2` for CANCEL
+
+ORDER payload:
+
+- `id:u64`
+- `side:u8` (`1=BUY`, `2=SELL`)
+- `order_type:u8` (`1=LIMIT`, `2=MARKET`)
+- `price:f64`
+- `size:u32`
+- `time:f64`
+
+CANCEL payload:
+
+- `id:u64`
+- `time:f64`
+
+## Runtime Control API
+
+When `[control].enabled = true`, the engine listens on UDP (default `127.0.0.1:6001`) for live commands:
+
+- `pause`
+- `resume`
+- `rate <multiplier>` (example: `rate 4.0`)
+- `display <seconds>` (example: `display 0.5`)
+- `regime <calm|volatile|crash|rally|recovery>`
+- `reload` (reloads runtime tunables from `-c/--config`)
+- `stats`
+
+Example:
+
+```bash
+echo "rate 10.0" | nc -u -w1 127.0.0.1 6001
+echo "regime crash" | nc -u -w1 127.0.0.1 6001
 ```
 # orderflow-rs

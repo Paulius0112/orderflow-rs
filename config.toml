@@ -20,10 +20,15 @@ tick_size = 0.01
 # 1.0 = use regime defaults, 2.0 = double throughput, 0.5 = half throughput
 throughput_scale = 1.0
 
+# RNG seed for reproducible runs (random if omitted)
+# seed = 42
+
 [network]
 # UDP multicast group and port
 multicast_group = "239.255.0.1"
 multicast_port = 5555
+# Wire format: text | binary
+wire_format = "text"
 
 [orders]
 # Log-normal order size distribution parameters
@@ -51,3 +56,10 @@ log_file = "orderflow.log"
 
 # How often to print summary stats to console (seconds)
 display_interval = 1.0
+
+[control]
+# Enable runtime UDP control API
+enabled = true
+
+# Control API bind address (send UDP commands here)
+bind = "127.0.0.1:6001"

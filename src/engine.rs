@@ -1,11 +1,17 @@
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use rand_distr::{Exp, LogNormal, Poisson, Uniform};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::net::UdpSocket;
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use crate::config::{AppConfig, OutputMode};
+use crate::config::{AppConfig, FileConfig, OutputMode};
 use crate::multicast::MulticastSender;
 use crate::order::{Order, OrderType, Side};
 use crate::regime::{self, Regime, RegimeState};
@@ -74,6 +80,94 @@ fn box_mid() -> String {
 
 fn box_bottom() -> String {
     format!("└─{}─┘", "─".repeat(BOX_W))
+}
+
+enum ControlCommand {
+    Pause,
+    Resume,
+    Throughput(f64),
+    DisplayInterval(f64),
+    Regime(Regime),
+    Reload,
+    Stats,
+}
+
+struct RuntimeTunables {
+    throughput_scale: f64,
+    display_interval: f64,
+    shock_prob: f64,
+    paused: bool,
+}
+
+fn parse_regime(s: &str) -> Option<Regime> {
+    match s {
+        "calm" => Some(Regime::Calm),
+        "volatile" => Some(Regime::Volatile),
+        "crash" => Some(Regime::Crash),
+        "rally" => Some(Regime::Rally),
+        "recovery" => Some(Regime::Recovery),
+        _ => None,
+    }
+}
+
+fn parse_control_command(input: &str) -> Option<ControlCommand> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.split_whitespace();
+    let cmd = parts.next()?.to_ascii_lowercase();
+    match cmd.as_str() {
+        "pause" => Some(ControlCommand::Pause),
+        "resume" => Some(ControlCommand::Resume),
+        "reload" => Some(ControlCommand::Reload),
+        "stats" => Some(ControlCommand::Stats),
+        "rate" | "throughput" => {
+            let v = parts.next()?.parse::<f64>().ok()?;
+            Some(ControlCommand::Throughput(v))
+        }
+        "display" => {
+            let v = parts.next()?.parse::<f64>().ok()?;
+            Some(ControlCommand::DisplayInterval(v))
+        }
+        "regime" => {
+            let r = parse_regime(&parts.next()?.to_ascii_lowercase())?;
+            Some(ControlCommand::Regime(r))
+        }
+        _ => None,
+    }
+}
+
+fn spawn_control_listener(bind: &str) -> std::io::Result<Receiver<ControlCommand>> {
+    let socket = UdpSocket::bind(bind)?;
+    socket.set_read_timeout(Some(Duration::from_millis(500)))?;
+
+    let (tx, rx) = mpsc::channel::<ControlCommand>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match socket.recv_from(&mut buf) {
+                Ok((n, peer)) => {
+                    let cmd_text = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+                    if let Some(cmd) = parse_control_command(&cmd_text) {
+                        let _ = tx.send(cmd);
+                        let _ = socket.send_to(b"ok\n", peer);
+                    } else {
+                        let _ = socket.send_to(
+                            b"error: commands are pause|resume|rate <x>|display <sec>|regime <name>|reload|stats\n",
+                            peer,
+                        );
+                    }
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(rx)
 }
 
 /// Output sink that respects the configured output mode.
@@ -175,16 +269,44 @@ impl Output {
 }
 
 pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
 
     let scenario_cfg = ScenarioConfig::from_scenario(cfg.scenario);
     let mut state = RegimeState::new(scenario_cfg.starting_regime, &mut rng);
     let mut forced_event_fired = false;
 
-    let sender = MulticastSender::new(cfg.multicast_group, cfg.multicast_port)?;
+    let sender = MulticastSender::new(cfg.multicast_group, cfg.multicast_port, cfg.wire_format)?;
     let mut out = Output::new(cfg)?;
 
-    let scale = cfg.throughput_scale;
+    let mut runtime = RuntimeTunables {
+        throughput_scale: cfg.throughput_scale,
+        display_interval: cfg.display_interval,
+        shock_prob: cfg.shock_prob,
+        paused: false,
+    };
+
+    let control_rx = if cfg.control_enabled {
+        match spawn_control_listener(&cfg.control_bind) {
+            Ok(rx) => {
+                out.event(&format!("  ▶ CONTROL API listening on udp://{}", cfg.control_bind));
+                Some(rx)
+            }
+            Err(e) => {
+                out.event(&format!("  ⚠ control API disabled: {}", e));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let running = Arc::clone(&running);
+        ctrlc::set_handler(move || {
+            running.store(false, Ordering::SeqCst);
+        })?;
+    }
 
     // --- Startup banner ---
     out.print(&box_top());
@@ -194,8 +316,10 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     out.print(&box_line(&format!("regime:      {}", state.current)));
     out.print(&box_line(&format!("mid price:   {}", cfg.initial_price)));
     out.print(&box_line(&format!("tick:        {}s", cfg.tick_interval)));
-    out.print(&box_line(&format!("throughput:  {}x", scale)));
+    out.print(&box_line(&format!("seed:        {}", cfg.seed)));
+    out.print(&box_line(&format!("throughput:  {}x", runtime.throughput_scale)));
     out.print(&box_line(&format!("output:      {}", cfg.output_mode)));
+    out.print(&box_line(&format!("wire fmt:    {}", cfg.wire_format)));
     if out.to_file() {
         out.print(&box_line(&format!("log file:    {}", cfg.log_file)));
     }
@@ -203,12 +327,13 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         "multicast:   {}:{}",
         cfg.multicast_group, cfg.multicast_port
     )));
+    if cfg.control_enabled {
+        out.print(&box_line(&format!("control:     udp://{}", cfg.control_bind)));
+    }
     out.print(&box_bottom());
 
     let dt = dt_years(cfg.tick_interval);
     let dt_seconds = cfg.tick_interval;
-    let display_interval = cfg.display_interval;
-
     let size_dist = LogNormal::new(cfg.size_mean_log, cfg.size_std_log)?;
     let ttl_dist = Uniform::new(cfg.ttl_min, cfg.ttl_max);
 
@@ -221,7 +346,74 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut stats = TickStats::new();
     let mut time_since_display: f64 = 0.0;
 
-    loop {
+    while running.load(Ordering::Relaxed) {
+        if let Some(rx) = &control_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    ControlCommand::Pause => {
+                        runtime.paused = true;
+                        out.event("  ▶ CONTROL pause");
+                    }
+                    ControlCommand::Resume => {
+                        runtime.paused = false;
+                        out.event("  ▶ CONTROL resume");
+                    }
+                    ControlCommand::Throughput(v) if v >= 0.0 => {
+                        runtime.throughput_scale = v;
+                        out.event(&format!("  ▶ CONTROL throughput={}x", v));
+                    }
+                    ControlCommand::DisplayInterval(v) if v > 0.0 => {
+                        runtime.display_interval = v;
+                        out.event(&format!("  ▶ CONTROL display_interval={}s", v));
+                    }
+                    ControlCommand::Regime(next) => {
+                        state.transition_to(next, &mut rng);
+                        out.event(&format!("  ▶ CONTROL regime -> {}", state.current));
+                    }
+                    ControlCommand::Reload => {
+                        if let Some(path) = &cfg.config_path {
+                            match std::fs::read_to_string(path) {
+                                Ok(contents) => match toml::from_str::<FileConfig>(&contents) {
+                                    Ok(file_cfg) => {
+                                        runtime.throughput_scale = file_cfg.simulation.throughput_scale;
+                                        runtime.display_interval = file_cfg.output.display_interval;
+                                        runtime.shock_prob = file_cfg.shocks.probability;
+                                        out.event(&format!(
+                                            "  ▶ CONTROL reload OK throughput={}x display={}s shock_prob={}",
+                                            runtime.throughput_scale,
+                                            runtime.display_interval,
+                                            runtime.shock_prob
+                                        ));
+                                    }
+                                    Err(e) => out.event(&format!("  ⚠ reload parse failed: {}", e)),
+                                },
+                                Err(e) => out.event(&format!("  ⚠ reload read failed: {}", e)),
+                            }
+                        } else {
+                            out.event("  ⚠ reload unavailable (run with -c/--config)");
+                        }
+                    }
+                    ControlCommand::Stats => {
+                        out.event(&format!(
+                            "  ▶ CONTROL stats t={:.1}s mid={:.4} regime={} active={} paused={} throughput={}x",
+                            current_time,
+                            mid,
+                            state.current,
+                            active_orders.len(),
+                            runtime.paused,
+                            runtime.throughput_scale
+                        ));
+                    }
+                    _ => out.event("  ⚠ invalid control value"),
+                }
+            }
+        }
+
+        if runtime.paused {
+            std::thread::sleep(Duration::from_secs_f64(cfg.tick_interval));
+            continue;
+        }
+
         // --- Forced scenario event ---
         if !forced_event_fired
             && scenario_cfg.forced_event_time > 0.0
@@ -242,11 +434,12 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // --- Shock event ---
-        if rng.gen::<f64>() < cfg.shock_prob {
+        if rng.gen::<f64>() < runtime.shock_prob {
             let shock_pct =
                 cfg.shock_min_pct + rng.gen::<f64>() * (cfg.shock_max_pct - cfg.shock_min_pct);
             let direction: f64 = if rng.gen::<f64>() < 0.5 { 1.0 } else { -1.0 };
             mid *= 1.0 + direction * shock_pct;
+            mid = mid.max(cfg.tick_size);
 
             let sign = if direction > 0.0 { "+" } else { "" };
             out.event(&format!(
@@ -282,6 +475,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         };
         let diffusion_term = params.sigma * dt.sqrt() * z;
         mid *= (drift_term + diffusion_term).exp();
+        mid = mid.max(cfg.tick_size);
 
         // --- Print regime changes ---
         if state.current != last_printed_regime {
@@ -296,7 +490,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         // --- Generate orders for this tick (with throughput scaling) ---
         let mut tick_orders: Vec<Order> = Vec::new();
 
-        let limit_lambda = params.limit_rate * scale * dt_seconds;
+        let limit_lambda = params.limit_rate * runtime.throughput_scale * dt_seconds;
         let num_limits: u64 = if limit_lambda > 0.0 {
             rng.sample(Poisson::new(limit_lambda).unwrap()) as u64
         } else {
@@ -332,7 +526,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
         stats.limits_generated += num_limits;
 
-        let market_lambda = params.market_rate * scale * dt_seconds;
+        let market_lambda = params.market_rate * runtime.throughput_scale * dt_seconds;
         let num_markets: u64 = if market_lambda > 0.0 {
             rng.sample(Poisson::new(market_lambda).unwrap()) as u64
         } else {
@@ -391,7 +585,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         stats.cancels_expired += expired.len() as u64;
 
         // --- Regime-driven cancellations (with throughput scaling) ---
-        let cancel_lambda = params.cancel_rate * scale * dt_seconds;
+        let cancel_lambda = params.cancel_rate * runtime.throughput_scale * dt_seconds;
         let num_cancels: u64 = if cancel_lambda > 0.0 {
             rng.sample(Poisson::new(cancel_lambda).unwrap()) as u64
         } else {
@@ -415,7 +609,7 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
 
         // --- Periodic display ---
         time_since_display += dt_seconds;
-        if time_since_display >= display_interval {
+        if time_since_display >= runtime.display_interval {
             out.summary(
                 current_time,
                 mid,
@@ -436,6 +630,9 @@ pub fn run(cfg: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         current_time += dt_seconds;
-        std::thread::sleep(std::time::Duration::from_secs_f64(dt_seconds));
+        std::thread::sleep(Duration::from_secs_f64(dt_seconds));
     }
+
+    out.event("Shutting down...");
+    Ok(())
 }
